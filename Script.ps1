@@ -1,150 +1,138 @@
-﻿Add-Type -Path "F:\Windows Files\Program Files\Scripts\Soulseek to Lidarr\taglib-sharp.dll" #Path That conatins this script
+import os
+import json
+import requests
+import shutil
+from time import sleep
+import taglib
 
-$sourcePath = 'F:\Download\Soulseek\complete NEW\complete'#  Soulseek complete download directory
-$targetBasePath = 'F:\Media\Audio\Music\Music - Managed (Lidarr)'#  the directory that holds your genre folders for lidarr
-$holdingPath = 'F:\Media\Audio\Music\Holding\Soulseek Waiting Lidarr Import' #holding directory for unmatched artists
-$logPath = 'F:\Windows Files\Program Files\Scripts\Soulseek to Lidarr\music-organizer-log.txt'# path to this script
+# Paths and configuration
+source_path = '/mnt/downloads/slskd/complete'
+target_base_path = '/mnt/remote/usenet/Music'
+holding_path = '/mnt/downloads/slskd/complete'
+log_path = '/mnt/opt/scripts/lidarr/slskd/music-organizer-log.txt'
 
+lidarr_host = "http://lidarr:8686"
+api_key = "Your_API_Key"
+headers = {"X-Api-Key": api_key}
 
-$apiKey = "Your API Key"
-$lidarrHost = "http://localhost:8686"
-$headers = @{ "X-Api-Key" = $apiKey }
+extensions = ['mp3', 'wav', 'aac', 'flac', 'm4a', 'alac', 'ogg', 'wma', 'aif', 'aiff', 'ape', 'dsf', 'dff', 'midi', 'mid', 'opus']
 
-$extensions = 'mp3', 'wav', 'aac', 'flac', 'm4a', 'alac', 'ogg', 'wma', 'aif', 'aiff', 'ape', 'dsf', 'dff', 'midi', 'mid', 'opus'
+def write_log(message):
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with open(log_path, 'a') as log_file:
+        log_file.write(f"[{timestamp}] {message}\n")
 
-function Write-Log {
-    Param ([string]$message)
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Add-Content -Path $logPath -Value "[$timestamp] $message"
-}
+def lookup_artist_id(artist_name):
+    encoded_artist_name = requests.utils.quote(artist_name)
+    response = requests.get(f"{lidarr_host}/api/v1/artist/lookup?term={encoded_artist_name}", headers=headers)
+    if response.status_code == 200 and response.json():
+        artist_id = response.json()[0]['id']
+        write_log(f"Artist ID found for '{artist_name}': {artist_id}")
+        return artist_id
+    else:
+        write_log(f"No artist found with the name '{artist_name}'.")
+        return None
 
+def retag_files(artist_id):
+    uri = f"{lidarr_host}/api/v1/retag?artistId={artist_id}"
+    response = requests.get(uri, headers=headers)
+    for item in response.json():
+        path = item['path']
+        file = taglib.File(path)
+        for change in item['changes']:
+            property_name = change['field'].replace(' ', '')
+            new_value = change['newValue']
+            if property_name.lower() in file.tags:
+                file.tags[property_name.lower()] = [new_value]
+        parent_directory = os.path.dirname(artist_path)
+        genre = os.path.basename(parent_directory)
+        file.tags['genre'] = [genre]
+        file.save()
+        write_log(f"Successfully updated tags for file: {path}")
 
+def process_files(artist_id):
+    uri = f"{lidarr_host}/api/v1/rename?artistId={artist_id}"
+    response = requests.get(uri, headers=headers)
+    for item in response.json():
+        existing_path = item['existingPath']
+        new_path = item['newPath']
+        new_dir = os.path.dirname(new_path)
+        if not os.path.exists(new_dir):
+            os.makedirs(new_dir)
+            write_log(f"Created directory: {new_dir}")
+        shutil.move(existing_path, new_path)
+        write_log(f"Successfully moved and renamed file to: {new_path}")
 
-function Lookup-ArtistID {
-    param ([string]$artistName)
-    $encodedArtistName = [uri]::EscapeDataString($artistName)
-    $response = Invoke-RestMethod -Uri "$lidarrHost/api/v1/artist/lookup?term=$encodedArtistName" -Method Get -Headers $headers
-    if ($response.Count -gt 0) {
-        $artistId = $response[0].id
-        Write-Log "Artist ID found for '$artistName': $artistId"
-        return $artistId
-    } else {
-        Write-Log "No artist found with the name '$artistName'."
-        return $null
-    }
-}
+def trigger_lidarr_rescan(path):
+    body = json.dumps({
+        "name": "RescanFolders",
+        "folders": [path]
+    })
+    response = requests.post(f"{lidarr_host}/api/v1/command", headers=headers, data=body)
+    command_id = response.json()['id']
+    while True:
+        sleep(5)
+        command_status_response = requests.get(f"{lidarr_host}/api/v1/command/{command_id}", headers=headers)
+        if command_status_response.json()['status'] == "completed":
+            break
+    write_log(f"Lidarr rescan completed for {path}")
 
-function Retag-Files {
-    param ([string]$artistId)
-    $uri = "$lidarrHost/api/v1/retag?artistId=${artistId}"
-    try {
-        $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get
-        foreach ($item in $response) {
-            $path = $item.path
-            $file = [TagLib.File]::Create($path)
-            foreach ($change in $item.changes) {
-                $propertyName = $change.field -replace ' ', ''
-                $newValue = $change.newValue
-                if ($file.Tag.PSObject.Properties.Name -contains $propertyName) {
-                    $file.Tag.$propertyName = $newValue
-                }
-            }
-            $parentDirectory = Split-Path -Path $artistPath -Parent
-            $genre = (Split-Path -Path $parentDirectory -Leaf)
-            $file.Tag.Genres = @($genre)
-            $file.Save()
-            Write-Host "Successfully updated tags for file: $path"
-        }
-    } catch {
-        Write-Error "Failed to fetch retag information or update tags: $_"
-    }
-}
+def main():
+    dry_run = False
+    files = [os.path.join(dp, f) for dp, dn, filenames in os.walk(source_path) for f in filenames if f.split('.')[-1] in extensions]
+    grouped_files = {}
+    for file_path in files:
+        artist = taglib.File(file_path).tags.get('ARTIST', [None])[0]
+        if artist not in grouped_files:
+            grouped_files[artist] = []
+        grouped_files[artist].append(file_path)
 
-function Process-Files {
-    param ([string]$artistId)
-    $uri = "$Lidarrhost/api/v1/rename?artistId=${artistId}"
-    try {
-        $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get
-        foreach ($item in $response) {
-            $existingPath = $item.existingPath
-            $newPath = $item.newPath
-            $newDir = [System.IO.Path]::GetDirectoryName($newPath)
-            if (-not (Test-Path -Path $newDir)) {
-                New-Item -ItemType Directory -Path $newDir -Force | Out-Null
-                Write-Host "Created directory: $newDir"
-            }
-            Move-Item -Path $existingPath -Destination $newPath -Force
-            Write-Host "Successfully moved and renamed file to: $newPath"
-        }
-    } catch {
-        Write-Error "Failed to fetch rename information or process files: $_"
-    }
-}
+    for artist, file_paths in grouped_files.items():
+        artist_directory = None
+        for root, dirs, _ in os.walk(target_base_path):
+            if artist in dirs:
+                artist_directory = os.path.join(root, artist)
+                break
 
-function Trigger-LidarrRescan {
-    param ([string]$path)
-    $body = @{
-        name = "RescanFolders"
-        folders = @($path)
-    } | ConvertTo-Json
-    $response = Invoke-RestMethod -Uri "$lidarrHost/api/v1/command" -Method Post -Headers $headers -Body $body -ContentType "application/json"
-    $commandId = $response.id
-    do {
-        Start-Sleep -Seconds 5
-        $commandStatusResponse = Invoke-RestMethod -Uri "$lidarrHost/api/v1/command/$commandId" -Method Get -Headers $headers
-    } while ($commandStatusResponse.status -ne "completed")
-    Write-Log "Lidarr rescan completed for $path"
-}
+        is_in_holding_path = False
+        if not artist_directory:
+            artist_directory = os.path.join(holding_path, artist)
+            is_in_holding_path = True
+            if not dry_run:
+                os.makedirs(artist_directory, exist_ok=True)
+            write_log(f"Fallback created artist directory: {artist_directory}")
 
-$dryRun = $false
+        for file_path in file_paths:
+            try:
+                tag_file = taglib.File(file_path)
+                album = tag_file.tags.get('ALBUM', [None])[0]
+                if not album:
+                    write_log(f"Skipping file due to missing album tag: {file_path}")
+                    continue
 
-$files = Get-ChildItem -Path $sourcePath -Recurse | Where-Object { $_.Extension -replace '\.', '' -in $extensions }
-$groupedFiles = $files | Group-Object { [TagLib.File]::Create($_.FullName).Tag.FirstPerformer }
+                album_directory = os.path.join(artist_directory, album)
+                if not os.path.exists(album_directory):
+                    if not dry_run:
+                        os.makedirs(album_directory, exist_ok=True)
+                    write_log(f"Created album directory: {album_directory}")
 
-foreach ($group in $groupedFiles) {
-    $artist = $group.Name
-    $artistDirectory = Get-ChildItem -Path $targetBasePath -Directory -Recurse | Where-Object { $_.Name -eq $artist } | Select-Object -First 1
-    $isInHoldingPath = $false
-    if ($artistDirectory) {
-        $artistPath = $artistDirectory.FullName
-    } else {
-        $artistPath = Join-Path -Path $holdingPath -ChildPath $artist
-        $isInHoldingPath = $true
-        if (-not $dryRun) { $null = New-Item -Path $artistPath -ItemType Directory -Force }
-        Write-Log "Fallback created artist directory: $artistPath"
-    }
-    foreach ($file in $group.Group) {
-        try {
-            $tagFile = [TagLib.File]::Create($file.FullName)
-            $album = $tagFile.Tag.Album
-            if (-not $album) {
-                Write-Log "Skipping file due to missing album tag: $($file.FullName)"
-                continue
-            }
-            $albumDirectory = Join-Path -Path $artistPath -ChildPath $album
-            if (-not (Test-Path -Path $albumDirectory)) {
-                if (-not $dryRun) { $null = New-Item -Path $albumDirectory -ItemType Directory -Force }
-                Write-Log "Created album directory: $albumDirectory"
-            }
-            $destination = Join-Path -Path $albumDirectory -ChildPath $file.Name
-            if (-not $dryRun) {
-                Move-Item -Path $file.FullName -Destination $destination -Force
-                Write-Log "Moved file from $($file.FullName) to $destination"
-            }
-        } catch {
-            Write-Log "Error processing file $($file.FullName): $_"
-        }
-    }
+                destination = os.path.join(album_directory, os.path.basename(file_path))
+                if not dry_run:
+                    shutil.move(file_path, destination)
+                    write_log(f"Moved file from {file_path} to {destination}")
 
-    Trigger-LidarrRescan -path $artistPath
+            except Exception as e:
+                write_log(f"Error processing file {file_path}: {e}")
 
-    $artistId = Lookup-ArtistID -artistName $artist
+        trigger_lidarr_rescan(artist_directory)
 
-    Process-Files -artistId $artistId
+        artist_id = lookup_artist_id(artist)
+        if artist_id:
+            process_files(artist_id)
+            retag_files(artist_id)
+            trigger_lidarr_rescan(artist_directory)
 
-    Retag-Files -artistId $artistId
+    write_log("Operation completed.")
 
-    Trigger-LidarrRescan -path $artistPath
-}
-
-Write-Host "Operation completed. Please check the log file at $logPath for details."
+if __name__ == "__main__":
+    main()
