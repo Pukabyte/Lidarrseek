@@ -2,8 +2,8 @@ import time
 import json
 import subprocess
 
-config_path = 'F:\\Windows Files\\Program Files\\Scripts\\Soulseek to Lidarr\\AutoRunFrequency.json'
-script_path = 'F:\\Windows Files\\Program Files\\Scripts\\Soulseek to Lidarr\\script.py'
+config_path = '/mnt/opt/scripts/lidarr/slskd/AutoRunFrequency.json'
+script_path = '/mnt/opt/scripts/lidarr/slskd/script.py'
 
 def load_config(config_path):
     with open(config_path, 'r') as file:
