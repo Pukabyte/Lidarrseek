@@ -2,7 +2,7 @@ import time
 import json
 import subprocess
 
-config_path = '/mnt/opt/scripts/lidarr/slskd/AutoRunFrequency.json'
+config_path = '/mnt/opt/scripts/lidarr/slskd/autorunfrequency.json'
 script_path = '/mnt/opt/scripts/lidarr/slskd/script.py'
 
 def load_config(config_path):
